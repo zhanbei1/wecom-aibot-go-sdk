@@ -48,7 +48,11 @@ func (c *WeComApiClient) DownloadFileRaw(fileURL string) (*FileResult, error) {
 		c.logger.Error("File download failed: " + err.Error())
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			c.logger.Error("Failed to close response body: " + err.Error())
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		c.logger.Error("File download failed, status: " + resp.Status)

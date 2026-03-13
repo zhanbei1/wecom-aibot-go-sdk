@@ -165,7 +165,7 @@ func (m *WsConnectionManager) Connect() {
 
 	// 清理可能未完全关闭的旧连接
 	if m.ws != nil {
-		m.ws.Close()
+		_ = m.ws.Close()
 		m.ws = nil
 	}
 
@@ -268,7 +268,7 @@ func (m *WsConnectionManager) handleMessage(data []byte) {
 func (m *WsConnectionManager) handleAuthResponse(frame *WsFrame) {
 	if frame.ErrCode != 0 {
 		m.logger.Error(fmt.Sprintf("Authentication failed: errcode=%d, errmsg=%s", frame.ErrCode, frame.ErrMsg))
-		m.OnError(errors.New(fmt.Sprintf("Authentication failed: %s (code: %d)", frame.ErrMsg, frame.ErrCode)))
+		m.OnError(fmt.Errorf("authentication failed: %s (code: %d)", frame.ErrMsg, frame.ErrCode))
 		return
 	}
 
@@ -328,7 +328,7 @@ func (m *WsConnectionManager) sendHeartbeat() {
 		m.logger.Warn(fmt.Sprintf("No heartbeat ack received for %d consecutive pings, connection considered dead", m.missedPongCount))
 		m.stopHeartbeat()
 		if m.ws != nil {
-			m.ws.Close()
+			_ = m.ws.Close()
 		}
 		return
 	}
@@ -496,7 +496,7 @@ func (m *WsConnectionManager) enqueueReply(reqID string, item replyQueueItem) {
 	// 防止队列无限增长
 	if len(queue) >= maxReplyQueueSize {
 		m.logger.Warn(fmt.Sprintf("Reply queue for reqId %s exceeds max size (%d), rejecting new message", reqID, maxReplyQueueSize))
-		item.reject(errors.New(fmt.Sprintf("Reply queue for reqId %s exceeds max size", reqID)))
+		item.reject(fmt.Errorf("Reply queue for reqId %s exceeds max size", reqID))
 		return
 	}
 
@@ -668,7 +668,7 @@ func (m *WsConnectionManager) Disconnect() {
 	m.clearPendingMessages("Connection manually closed")
 
 	if m.ws != nil {
-		m.ws.Close()
+		_ = m.ws.Close()
 		m.ws = nil
 	}
 

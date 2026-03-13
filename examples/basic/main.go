@@ -73,10 +73,10 @@ func main() {
 		fmt.Printf("  内容: %s\n", msg.Text.Content)
 
 		// 回复消息
-		streamID := fmt.Sprintf("stream_%d", frame.Headers.ReqID)
+		streamID := fmt.Sprintf("stream_%s", frame.Headers.ReqID)
 		reply := "收到消息: " + msg.Text.Content
 
-		client.ReplyStream(frame, streamID, reply, true, nil, nil)
+		_, _ = client.ReplyStream(frame, streamID, reply, true, nil, nil)
 	})
 
 	client.OnMessageImage(func(frame *aibot2.WsFrame) {
@@ -168,7 +168,7 @@ func main() {
 
 		// 发送欢迎语
 		welcomeBody := aibot2.CreateTextReplyBody("你好！有什么可以帮助你的吗？")
-		client.ReplyWelcome(frame, welcomeBody)
+		_, _ = client.ReplyWelcome(frame, welcomeBody)
 	})
 
 	client.OnEventTemplateCardEvent(func(frame *aibot2.WsFrame) {

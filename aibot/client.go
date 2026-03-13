@@ -3,7 +3,6 @@ package aibot
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 )
 
@@ -420,11 +419,11 @@ func (c *WSClient) ReplyStreamWithCard(
 	streamID, content string,
 	finish bool,
 	options struct {
-	MsgItem        []ReplyMsgItem
-	StreamFeedback *ReplyFeedback
-	TemplateCard   *TemplateCard
-	CardFeedback   *ReplyFeedback
-},
+		MsgItem        []ReplyMsgItem
+		StreamFeedback *ReplyFeedback
+		TemplateCard   *TemplateCard
+		CardFeedback   *ReplyFeedback
+	},
 ) (*WsFrame, error) {
 	stream := struct {
 		ID       string         `json:"id"`
@@ -483,7 +482,7 @@ func (c *WSClient) SendMessage(chatID string, body interface{}) (*WsFrame, error
 
 	var bodyMap map[string]interface{}
 	bodyBytes, _ := json.Marshal(body)
-	json.Unmarshal(bodyBytes, &bodyMap)
+	_ = json.Unmarshal(bodyBytes, &bodyMap)
 
 	bodyMap["chatid"] = chatID
 
@@ -709,11 +708,3 @@ var _ = func() error {
 	_ = opts
 	return nil
 }()
-
-// 为了兼容性，提供一个字符串数组的支持
-func parseUserIDs(userIDs string) []string {
-	if userIDs == "" {
-		return nil
-	}
-	return strings.Split(userIDs, ",")
-}

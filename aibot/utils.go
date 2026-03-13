@@ -33,11 +33,3 @@ func generateRandomString(length int) string {
 func GenerateRandomString(length int) string {
 	return generateRandomString(length)
 }
-
-// formatTimestamp 格式化时间戳
-func formatTimestamp(t int64) string {
-	if t == 0 {
-		return ""
-	}
-	return time.Unix(t, 0).Format("2006-01-02 15:04:05")
-}
