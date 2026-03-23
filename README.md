@@ -18,6 +18,7 @@
 - **串行回复队列** — 同一 req_id 的回复消息串行发送，自动等待回执
 - **文件下载解密** — 内置 AES-256-CBC 文件解密，每个图片/文件消息自带独立的 aeskey
 - **可插拔日志** — 支持自定义 Logger，内置带时间戳的 DefaultLogger
+- **扫码创建机器人** — 调用企业微信 `generate` / `query_result` 接口，用扫码方式获取 `BotID` 与 `Secret`（与 [wecom-openclaw-cli](wecom-openclaw-cli/) 中二维码流程一致）
 
 ## 安装
 
@@ -118,6 +119,61 @@ func main() {
 | `RequestTimeout` | `int` | — | `10000` | HTTP 请求超时时间（毫秒） |
 | `WSURL` | `string` | — | `wss://openws.work.weixin.qq.com` | 自定义 WebSocket 连接地址 |
 | `Logger` | `Logger` | — | `DefaultLogger` | 自定义日志实例 |
+
+## 扫码创建机器人（获取 BotID / Secret）
+
+企业微信提供与企业微信客户端扫码绑定的创建流程：先请求 `https://work.weixin.qq.com/ai/qc/generate` 拿到 `auth_url`（用于生成二维码）和 `scode`，再轮询 `https://work.weixin.qq.com/ai/qc/query_result?scode=...`，直到 `data.status == "success"` 时从 `data.bot_info` 读取 `botid` 与 `secret`。默认 `source=wecom-cli`、`plat` 随操作系统映射（与 `wecom-openclaw-cli/dist/utils/qrcode.js` 一致）。
+
+SDK 提供以下方法（均在包 `aibot` 内）：
+
+| 函数 / 类型 | 说明 |
+| --- | --- |
+| `FetchQRCodeSession(ctx, cfg)` | 请求 generate，返回 `QRCodeSession`（`Scode`、`AuthURL`） |
+| `WaitForScanResult(ctx, cfg, scode)` | 轮询 query_result，成功则返回 `ScanBotCredentials`（`BotID`、`Secret`） |
+| `ScanQRCodeForBotInfo(ctx, cfg, onSession)` | 组合：拉取会话 → 可选回调展示二维码/链接 → 轮询至成功 |
+| `QRGenPageURL(scode)` | 浏览器打开的扫码页 URL（等价于 CLI 中打印的 `.../ai/qc/gen?source=...&scode=...`） |
+| `QRGenPageURLForSession(cfg, scode)` | 使用 `cfg.Source` 构造同上扫码页 |
+| `QRGenerateURL(source, plat)` | 构造带 `source`、`plat` 的 generate 请求 URL |
+| `QRPlatformFromGOOS()` | 将 `runtime.GOOS` 映射为接口要求的 `plat` |
+| `QRScanHTTPConfig` | 可配置 `Client`、`Source`、`Plat`、轮询间隔（默认 3s）、超时（默认 5 分钟）；`GenerateRequestURL` / `QueryURLBase` 可用于测试或自定义网关 |
+
+错误：`ErrQRGenerateBadResponse`、`ErrQRScanNoBotInfo`、`ErrQRScanTimeout`；`context` 取消时返回 `ctx.Err()`。
+
+示例（两步：先展示链接或二维码内容，再等待扫码）：
+
+```go
+ctx := context.Background()
+cfg := aibot.QRScanHTTPConfig{} // 可按需设置 Source、PollInterval、PollTimeout 等
+
+sess, err := aibot.FetchQRCodeSession(ctx, cfg)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println("请使用企业微信扫码，或浏览器打开:", aibot.QRGenPageURLForSession(cfg, sess.Scode))
+fmt.Println("二维码内容 URL:", sess.AuthURL)
+
+creds, err := aibot.WaitForScanResult(ctx, cfg, sess.Scode)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println("BotID:", creds.BotID, "Secret:", creds.Secret)
+
+client := aibot.NewWSClient(aibot.WSClientOptions{
+	BotID:  creds.BotID,
+	Secret: creds.Secret,
+})
+```
+
+或使用一站式回调（在回调里把 `sess.AuthURL` 转成二维码图片展示等）：
+
+```go
+creds, err := aibot.ScanQRCodeForBotInfo(ctx, cfg, func(s *aibot.QRCodeSession) error {
+	fmt.Println("打开链接扫码:", aibot.QRGenPageURLForSession(cfg, s.Scode))
+	return nil
+})
+```
+
+说明：本 SDK **不包含** 终端 ASCII 二维码绘制；若需在终端展示，可自行引入二维码库，以 `sess.AuthURL` 为内容生成图像或终端图案。
 
 ## API 文档
 
@@ -323,10 +379,10 @@ wecom-aibot-go-sdk/
 │   ├── message_handler.go  # 消息解析与事件分发
 │   ├── api.go              # HTTP API 客户端（文件下载）
 │   ├── crypto.go           # AES-256-CBC 文件解密
+│   ├── qrcode_scan.go      # 扫码创建机器人（generate / query_result）
 │   ├── logger.go           # 日志接口与默认实现
 │   ├── utils.go            # 工具方法
 │   ├── types.go            # 类型定义
-│   └── crypto.go           # AES 文件解密
 ├── examples/
 │   └── basic/main.go       # 基础使用示例
 ├── go.mod
