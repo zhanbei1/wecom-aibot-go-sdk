@@ -1,6 +1,11 @@
 package aibot
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+
+	"github.com/gorilla/websocket"
+)
 
 // ============================================================================
 // 常量定义
@@ -9,25 +14,31 @@ import "encoding/json"
 // WsCmd WebSocket 命令类型常量
 var WsCmd = struct {
 	// 开发者 → 企业微信
-	SUBSCRIBE        string // 认证订阅
-	HEARTBEAT        string // 心跳
-	RESPONSE         string // 回复消息
-	RESPONSE_WELCOME string // 回复欢迎语
-	RESPONSE_UPDATE  string // 更新模板卡片
-	SEND_MSG         string // 主动发送消息
+	SUBSCRIBE           string // 认证订阅
+	HEARTBEAT           string // 心跳
+	RESPONSE            string // 回复消息
+	RESPONSE_WELCOME    string // 回复欢迎语
+	RESPONSE_UPDATE     string // 更新模板卡片
+	SEND_MSG            string // 主动发送消息
+	UPLOAD_MEDIA_INIT   string // 上传临时素材 - 初始化
+	UPLOAD_MEDIA_CHUNK  string // 上传临时素材 - 分片上传
+	UPLOAD_MEDIA_FINISH string // 上传临时素材 - 完成上传
 
 	// 企业微信 → 开发者
 	CALLBACK       string // 消息推送回调
 	EVENT_CALLBACK string // 事件推送回调
 }{
-	SUBSCRIBE:        "aibot_subscribe",
-	HEARTBEAT:        "ping",
-	RESPONSE:         "aibot_respond_msg",
-	RESPONSE_WELCOME: "aibot_respond_welcome_msg",
-	RESPONSE_UPDATE:  "aibot_respond_update_msg",
-	SEND_MSG:         "aibot_send_msg",
-	CALLBACK:         "aibot_msg_callback",
-	EVENT_CALLBACK:   "aibot_event_callback",
+	SUBSCRIBE:           "aibot_subscribe",
+	HEARTBEAT:           "ping",
+	RESPONSE:            "aibot_respond_msg",
+	RESPONSE_WELCOME:    "aibot_respond_welcome_msg",
+	RESPONSE_UPDATE:     "aibot_respond_update_msg",
+	SEND_MSG:            "aibot_send_msg",
+	UPLOAD_MEDIA_INIT:   "aibot_upload_media_init",
+	UPLOAD_MEDIA_CHUNK:  "aibot_upload_media_chunk",
+	UPLOAD_MEDIA_FINISH: "aibot_upload_media_finish",
+	CALLBACK:            "aibot_msg_callback",
+	EVENT_CALLBACK:      "aibot_event_callback",
 }
 
 // MessageType 消息类型枚举
@@ -39,6 +50,7 @@ const (
 	MessageTypeMixed MessageType = "mixed"
 	MessageTypeVoice MessageType = "voice"
 	MessageTypeFile  MessageType = "file"
+	MessageTypeVideo MessageType = "video"
 )
 
 // TemplateCardType 卡片类型枚举
@@ -59,6 +71,7 @@ const (
 	EventTypeEnterChat         EventType = "enter_chat"
 	EventTypeTemplateCardEvent EventType = "template_card_event"
 	EventTypeFeedbackEvent     EventType = "feedback_event"
+	EventTypeDisconnected      EventType = "disconnected_event"
 )
 
 // ============================================================================
@@ -108,6 +121,12 @@ type VoiceContent struct {
 type FileContent struct {
 	URL    string `json:"url"`    // 文件的下载 url
 	AesKey string `json:"aeskey"` // 解密密钥
+}
+
+// VideoContent 视频结构体
+type VideoContent struct {
+	URL    string `json:"url"`              // 视频的下载 url
+	AesKey string `json:"aeskey,omitempty"` // 解密密钥
 }
 
 // MixedMsgItem 图文混排子项
@@ -175,6 +194,12 @@ type FileMessage struct {
 	File FileContent `json:"file"`
 }
 
+// VideoMessage 视频消息
+type VideoMessage struct {
+	BaseMessage
+	Video VideoContent `json:"video"`
+}
+
 // ReplyOptions 回复消息选项
 type ReplyOptions struct {
 	MsgID  string `json:"msgid"`
@@ -217,6 +242,11 @@ type TemplateCardEventData struct {
 
 // FeedbackEventData 用户反馈事件
 type FeedbackEventData struct {
+	EventType EventType `json:"eventtype"`
+}
+
+// DisconnectedEventData 连接断开事件：有新连接建立时，服务端向旧连接推送此事件并主动断开旧连接
+type DisconnectedEventData struct {
 	EventType EventType `json:"eventtype"`
 }
 
@@ -316,6 +346,80 @@ type SendTemplateCardMsgBody struct {
 	MsgType      string       `json:"msgtype"` // 固定为 template_card
 	TemplateCard TemplateCard `json:"template_card"`
 	ChatID       string       `json:"chatid"`
+}
+
+// ============================================================================
+// 媒体消息相关类型
+// ============================================================================
+
+// WeComMediaType 企业微信媒体类型
+type WeComMediaType string
+
+const (
+	WeComMediaTypeFile  WeComMediaType = "file"
+	WeComMediaTypeImage WeComMediaType = "image"
+	WeComMediaTypeVoice WeComMediaType = "voice"
+	WeComMediaTypeVideo WeComMediaType = "video"
+)
+
+// SendMediaMsgBody 媒体消息发送体（主动发送 + 被动回复共用）
+type SendMediaMsgBody struct {
+	MsgType WeComMediaType     `json:"msgtype"`
+	File    *MediaContent      `json:"file,omitempty"`
+	Image   *MediaContent      `json:"image,omitempty"`
+	Voice   *MediaContent      `json:"voice,omitempty"`
+	Video   *VideoMediaContent `json:"video,omitempty"`
+}
+
+// MediaContent 媒体内容（file/image/voice）
+type MediaContent struct {
+	MediaID string `json:"media_id"`
+}
+
+// VideoMediaContent 视频媒体内容
+type VideoMediaContent struct {
+	MediaID     string `json:"media_id"`
+	Title       string `json:"title,omitempty"`       // 不超过128字节
+	Description string `json:"description,omitempty"` // 不超过512字节
+}
+
+// UploadMediaOptions uploadMedia 方法选项
+type UploadMediaOptions struct {
+	Type     WeComMediaType `json:"type"`
+	Filename string         `json:"filename"`
+}
+
+// UploadMediaInitBody 上传素材初始化请求 body
+type UploadMediaInitBody struct {
+	Type        WeComMediaType `json:"type"`
+	Filename    string         `json:"filename"`
+	TotalSize   int            `json:"total_size"`
+	TotalChunks int            `json:"total_chunks"`
+	MD5         string         `json:"md5,omitempty"`
+}
+
+// UploadMediaInitResult 上传素材初始化响应 body
+type UploadMediaInitResult struct {
+	UploadID string `json:"upload_id"`
+}
+
+// UploadMediaChunkBody 上传素材分片请求 body
+type UploadMediaChunkBody struct {
+	UploadID   string `json:"upload_id"`
+	ChunkIndex int    `json:"chunk_index"`
+	Base64Data string `json:"base64_data"`
+}
+
+// UploadMediaFinishBody 完成上传请求 body
+type UploadMediaFinishBody struct {
+	UploadID string `json:"upload_id"`
+}
+
+// UploadMediaFinishResult 完成上传响应 body
+type UploadMediaFinishResult struct {
+	Type      WeComMediaType `json:"type"`
+	MediaID   string         `json:"media_id"`
+	CreatedAt string         `json:"created_at"`
 }
 
 // ============================================================================
@@ -477,30 +581,61 @@ type TemplateCard struct {
 
 // WSClientOptions WSClient 配置选项
 type WSClientOptions struct {
-	BotID                string // 机器人 ID
-	Secret               string // 机器人 Secret
-	ReconnectInterval    int    // 重连基础延迟（毫秒），默认 1000
-	MaxReconnectAttempts int    // 最大重连次数，默认 10，-1 表示无限
-	HeartbeatInterval    int    // 心跳间隔（毫秒），默认 30000
-	RequestTimeout       int    // 请求超时（毫秒），默认 10000
-	WSURL                string // 自定义 WebSocket 地址
-	Logger               Logger // 自定义日志
+	BotID                  string            // 机器人 ID
+	Secret                 string            // 机器人 Secret
+	Scene                  *int              // 场景值（可选）
+	PlugVersion            string            // 插件版本号（可选）
+	ReconnectInterval      int               // 重连基础延迟（毫秒），默认 1000
+	MaxReconnectAttempts   int               // 连接断开时的最大重连次数，默认 10，-1 表示无限
+	MaxAuthFailureAttempts int               // 认证失败时的最大重试次数，默认 5，-1 表示无限
+	HeartbeatInterval      int               // 心跳间隔（毫秒），默认 30000
+	RequestTimeout         int               // 请求超时（毫秒），默认 10000
+	WSURL                  string            // 自定义 WebSocket 地址
+	WsDialer               *websocket.Dialer // 自定义 WebSocket Dialer（如 TLS 配置等）
+	MaxReplyQueueSize      int               // 单个 req_id 的回复队列最大长度，默认 500
+	Logger                 Logger            // 自定义日志
 }
 
 // RequiredWSClientOptions 带默认值的配置
 type RequiredWSClientOptions struct {
-	ReconnectInterval    int
-	MaxReconnectAttempts int
-	HeartbeatInterval    int
-	RequestTimeout       int
-	WSURL                string
+	ReconnectInterval      int
+	MaxReconnectAttempts   int
+	MaxAuthFailureAttempts int
+	HeartbeatInterval      int
+	RequestTimeout         int
+	MaxReplyQueueSize      int
+	WSURL                  string
 }
 
 // DefaultWSClientOptions 默认配置值
 var DefaultWSClientOptions = RequiredWSClientOptions{
-	ReconnectInterval:    1000,
-	MaxReconnectAttempts: 10,
-	HeartbeatInterval:    30000,
-	RequestTimeout:       10000,
-	WSURL:                "wss://openws.work.weixin.qq.com",
+	ReconnectInterval:      1000,
+	MaxReconnectAttempts:   10,
+	MaxAuthFailureAttempts: 5,
+	HeartbeatInterval:      30000,
+	RequestTimeout:         10000,
+	MaxReplyQueueSize:      500,
+	WSURL:                  "wss://openws.work.weixin.qq.com",
+}
+
+// ============================================================================
+// 自定义错误类型
+// ============================================================================
+
+// WSAuthFailureError 认证失败重试次数用尽错误
+type WSAuthFailureError struct {
+	MaxAttempts int
+}
+
+func (e *WSAuthFailureError) Error() string {
+	return fmt.Sprintf("max auth failure attempts exceeded (%d)", e.MaxAttempts)
+}
+
+// WSReconnectExhaustedError 连接断开重连次数用尽错误
+type WSReconnectExhaustedError struct {
+	MaxAttempts int
+}
+
+func (e *WSReconnectExhaustedError) Error() string {
+	return fmt.Sprintf("max reconnect attempts exceeded (%d)", e.MaxAttempts)
 }
