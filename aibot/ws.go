@@ -176,10 +176,10 @@ func NewWsConnectionManager(
 	}
 }
 
-// SetCredentials 设置认证凭证
+// SetCredentials 设置认证凭证（会去除 bot_id、secret 首尾空白，避免复制粘贴带入换行导致校验失败）
 func (m *WsConnectionManager) SetCredentials(botID, botSecret string, extraAuthParams map[string]interface{}) {
-	m.botID = botID
-	m.botSecret = botSecret
+	m.botID = strings.TrimSpace(botID)
+	m.botSecret = strings.TrimSpace(botSecret)
 	m.extraAuthParams = extraAuthParams
 }
 
@@ -366,9 +366,18 @@ func (m *WsConnectionManager) isDisconnectedEvent(frame *WsFrame) bool {
 // handleAuthResponse 处理认证响应
 func (m *WsConnectionManager) handleAuthResponse(frame *WsFrame) {
 	if frame.ErrCode != 0 {
-		m.logger.Error(fmt.Sprintf("Authentication failed: errcode=%d, errmsg=%s", frame.ErrCode, frame.ErrMsg))
+		hint := AuthFailureUserHint(frame.ErrCode, frame.ErrMsg)
+		logMsg := fmt.Sprintf("Authentication failed: errcode=%d, errmsg=%s", frame.ErrCode, frame.ErrMsg)
+		if hint != "" {
+			logMsg += ". " + hint
+		}
+		m.logger.Error(logMsg)
 		if m.OnError != nil {
-			m.OnError(fmt.Errorf("authentication failed: %s (code: %d)", frame.ErrMsg, frame.ErrCode))
+			errText := fmt.Sprintf("authentication failed: errcode=%d, errmsg=%s", frame.ErrCode, frame.ErrMsg)
+			if hint != "" {
+				errText += ". " + hint
+			}
+			m.OnError(fmt.Errorf("%s", errText))
 		}
 		// 标记为认证失败，close 事件中 scheduleReconnect 会据此使用 authFailureAttempts 计数器
 		m.lastCloseWasAuthFailure = true

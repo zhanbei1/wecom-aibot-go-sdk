@@ -1,3 +1,5 @@
+// 企业微信 AI 机器人扫码创建：HTTP 调用 generate 与 query_result，成功后得到 BotID、Secret，
+// 凭据用途与控制台创建的一致，交给 WSClient / SetCredentials，连上 openws 后发认证帧即完成登录。
 package aibot
 
 import (
