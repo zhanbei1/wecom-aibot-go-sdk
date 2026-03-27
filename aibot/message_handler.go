@@ -87,6 +87,8 @@ func (h *MessageHandler) handleMessageCallback(frame *WsFrame, emitter FrameEmit
 		emitter.EmitMessageVoice(frame)
 	case string(MessageTypeFile):
 		emitter.EmitMessageFile(frame)
+	case string(MessageTypeVideo):
+		emitter.EmitMessageVideo(frame)
 	default:
 		h.logger.Debug("Received unhandled message type: " + msgtype)
 	}
@@ -147,6 +149,8 @@ func (h *MessageHandler) handleEventCallback(frame *WsFrame, emitter FrameEmitte
 		emitter.EmitEventTemplateCardEvent(frame)
 	case string(EventTypeFeedbackEvent):
 		emitter.EmitEventFeedbackEvent(frame)
+	case string(EventTypeDisconnected):
+		emitter.EmitEventDisconnected(frame)
 	default:
 		h.logger.Debug("Received unhandled event type: " + eventType)
 	}
@@ -178,12 +182,14 @@ type FrameEmitter interface {
 	EmitMessageMixed(frame *WsFrame)
 	EmitMessageVoice(frame *WsFrame)
 	EmitMessageFile(frame *WsFrame)
+	EmitMessageVideo(frame *WsFrame)
 	// 通用事件
 	EmitEvent(frame *WsFrame)
 	// 特定类型事件
 	EmitEventEnterChat(frame *WsFrame)
 	EmitEventTemplateCardEvent(frame *WsFrame)
 	EmitEventFeedbackEvent(frame *WsFrame)
+	EmitEventDisconnected(frame *WsFrame)
 }
 
 // ============================================================================
@@ -199,7 +205,9 @@ func (e *NoOpEmitter) EmitMessageImage(frame *WsFrame)           {}
 func (e *NoOpEmitter) EmitMessageMixed(frame *WsFrame)           {}
 func (e *NoOpEmitter) EmitMessageVoice(frame *WsFrame)           {}
 func (e *NoOpEmitter) EmitMessageFile(frame *WsFrame)            {}
+func (e *NoOpEmitter) EmitMessageVideo(frame *WsFrame)           {}
 func (e *NoOpEmitter) EmitEvent(frame *WsFrame)                  {}
 func (e *NoOpEmitter) EmitEventEnterChat(frame *WsFrame)         {}
 func (e *NoOpEmitter) EmitEventTemplateCardEvent(frame *WsFrame) {}
 func (e *NoOpEmitter) EmitEventFeedbackEvent(frame *WsFrame)     {}
+func (e *NoOpEmitter) EmitEventDisconnected(frame *WsFrame)      {}

@@ -47,11 +47,13 @@ type WSClient struct {
 	onMessageMixed MessageHandlerFunc
 	onMessageVoice MessageHandlerFunc
 	onMessageFile  MessageHandlerFunc
+	onMessageVideo MessageHandlerFunc
 
 	onEvent                  EventHandlerFunc
 	onEventEnterChat         EventHandlerFunc
 	onEventTemplateCardEvent EventHandlerFunc
 	onEventFeedbackEvent     EventHandlerFunc
+	onEventDisconnected      EventHandlerFunc
 
 	onConnected     ConnectionHandlerFunc
 	onAuthenticated ConnectionHandlerFunc
@@ -71,11 +73,13 @@ type WSClient struct {
 func NewWSClient(options WSClientOptions) *WSClient {
 	// 设置默认值
 	opts := RequiredWSClientOptions{
-		ReconnectInterval:    1000,
-		MaxReconnectAttempts: 10,
-		HeartbeatInterval:    30000,
-		RequestTimeout:       10000,
-		WSURL:                "wss://openws.work.weixin.qq.com",
+		ReconnectInterval:      1000,
+		MaxReconnectAttempts:   10,
+		MaxAuthFailureAttempts: 5,
+		HeartbeatInterval:      30000,
+		RequestTimeout:         10000,
+		MaxReplyQueueSize:      500,
+		WSURL:                  "wss://openws.work.weixin.qq.com",
 	}
 
 	if options.ReconnectInterval > 0 {
@@ -84,11 +88,17 @@ func NewWSClient(options WSClientOptions) *WSClient {
 	if options.MaxReconnectAttempts != 0 {
 		opts.MaxReconnectAttempts = options.MaxReconnectAttempts
 	}
+	if options.MaxAuthFailureAttempts != 0 {
+		opts.MaxAuthFailureAttempts = options.MaxAuthFailureAttempts
+	}
 	if options.HeartbeatInterval > 0 {
 		opts.HeartbeatInterval = options.HeartbeatInterval
 	}
 	if options.RequestTimeout > 0 {
 		opts.RequestTimeout = options.RequestTimeout
+	}
+	if options.MaxReplyQueueSize > 0 {
+		opts.MaxReplyQueueSize = options.MaxReplyQueueSize
 	}
 	if options.WSURL != "" {
 		opts.WSURL = options.WSURL
@@ -115,10 +125,20 @@ func NewWSClient(options WSClientOptions) *WSClient {
 		opts.ReconnectInterval,
 		opts.MaxReconnectAttempts,
 		opts.WSURL,
+		options.WsDialer,
+		opts.MaxReplyQueueSize,
+		opts.MaxAuthFailureAttempts,
 	)
 
 	// 设置认证凭证
-	client.wsManager.SetCredentials(options.BotID, options.Secret)
+	extraAuthParams := make(map[string]interface{})
+	if options.Scene != nil {
+		extraAuthParams["scene"] = *options.Scene
+	}
+	if options.PlugVersion != "" {
+		extraAuthParams["plug_version"] = options.PlugVersion
+	}
+	client.wsManager.SetCredentials(options.BotID, options.Secret, extraAuthParams)
 
 	// 绑定 WebSocket 事件
 	client.setupWsEvents()
@@ -142,6 +162,17 @@ func (c *WSClient) setupWsEvents() {
 	}
 
 	c.wsManager.OnDisconnected = func(reason string) {
+		if c.onDisconnected != nil {
+			c.onDisconnected(reason)
+		}
+	}
+
+	// 服务端因新连接建立而主动断开旧连接
+	c.wsManager.OnServerDisconnect = func(reason string) {
+		c.logger.Warn("Server disconnected this connection: " + reason)
+		c.mu.Lock()
+		c.started = false
+		c.mu.Unlock()
 		if c.onDisconnected != nil {
 			c.onDisconnected(reason)
 		}
@@ -242,6 +273,11 @@ func (c *WSClient) OnMessageFile(handler MessageHandlerFunc) {
 	c.onMessageFile = handler
 }
 
+// OnMessageVideo 收到视频消息
+func (c *WSClient) OnMessageVideo(handler MessageHandlerFunc) {
+	c.onMessageVideo = handler
+}
+
 // OnEvent 收到事件回调（所有事件类型）
 func (c *WSClient) OnEvent(handler EventHandlerFunc) {
 	c.onEvent = handler
@@ -260,6 +296,11 @@ func (c *WSClient) OnEventTemplateCardEvent(handler EventHandlerFunc) {
 // OnEventFeedbackEvent 收到用户反馈事件
 func (c *WSClient) OnEventFeedbackEvent(handler EventHandlerFunc) {
 	c.onEventFeedbackEvent = handler
+}
+
+// OnEventDisconnected 收到连接断开事件（有新连接建立，服务端主动断开当前旧连接）
+func (c *WSClient) OnEventDisconnected(handler EventHandlerFunc) {
+	c.onEventDisconnected = handler
 }
 
 // OnConnected 连接建立
@@ -327,6 +368,12 @@ func (c *WSClient) EmitMessageFile(frame *WsFrame) {
 	}
 }
 
+func (c *WSClient) EmitMessageVideo(frame *WsFrame) {
+	if c.onMessageVideo != nil {
+		c.onMessageVideo(frame)
+	}
+}
+
 func (c *WSClient) EmitEvent(frame *WsFrame) {
 	if c.onEvent != nil {
 		c.onEvent(frame)
@@ -348,6 +395,12 @@ func (c *WSClient) EmitEventTemplateCardEvent(frame *WsFrame) {
 func (c *WSClient) EmitEventFeedbackEvent(frame *WsFrame) {
 	if c.onEventFeedbackEvent != nil {
 		c.onEventFeedbackEvent(frame)
+	}
+}
+
+func (c *WSClient) EmitEventDisconnected(frame *WsFrame) {
+	if c.onEventDisconnected != nil {
+		c.onEventDisconnected(frame)
 	}
 }
 
@@ -513,6 +566,139 @@ func (c *WSClient) SendTemplateCard(chatID string, templateCard TemplateCard) (*
 	body.MsgType = "template_card"
 
 	return c.SendMessage(chatID, body)
+}
+
+// ============================================================================
+// 媒体上传与发送
+// ============================================================================
+
+// UploadMedia 上传临时素材（三步分片上传）
+//
+// 通过 WebSocket 长连接执行分片上传：init → chunk × N → finish
+// 单个分片不超过 512KB（Base64 编码前），最多 100 个分片。
+func (c *WSClient) UploadMedia(fileBuffer []byte, options UploadMediaOptions) (*UploadMediaFinishResult, error) {
+	totalSize := len(fileBuffer)
+
+	// 分片大小：512KB（Base64 编码前）
+	const chunkSize = 512 * 1024
+	totalChunks := (totalSize + chunkSize - 1) / chunkSize
+
+	if totalChunks > 100 {
+		return nil, fmt.Errorf("file too large: %d chunks exceeds maximum of 100 chunks (max ~50MB)", totalChunks)
+	}
+
+	// 计算文件 MD5
+	md5Hash := md5Sum(fileBuffer)
+
+	c.logger.Info(fmt.Sprintf("Uploading media: type=%s, filename=%s, size=%d, chunks=%d", options.Type, options.Filename, totalSize, totalChunks))
+
+	// Step 1: 初始化上传
+	initReqID := GenerateReqId(WsCmd.UPLOAD_MEDIA_INIT)
+	initResult, err := c.wsManager.SendReply(initReqID, UploadMediaInitBody{
+		Type:        options.Type,
+		Filename:    options.Filename,
+		TotalSize:   totalSize,
+		TotalChunks: totalChunks,
+		MD5:         md5Hash,
+	}, WsCmd.UPLOAD_MEDIA_INIT)
+	if err != nil {
+		return nil, fmt.Errorf("upload init failed: %w", err)
+	}
+
+	var initResp UploadMediaInitResult
+	if err := json.Unmarshal(initResult.Body, &initResp); err != nil {
+		return nil, fmt.Errorf("upload init response parse failed: %w", err)
+	}
+	if initResp.UploadID == "" {
+		return nil, fmt.Errorf("upload init failed: no upload_id returned")
+	}
+
+	c.logger.Info("Upload init success: upload_id=" + initResp.UploadID)
+
+	// Step 2: 分片上传（串行，避免并发问题）
+	for i := 0; i < totalChunks; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > totalSize {
+			end = totalSize
+		}
+		chunk := fileBuffer[start:end]
+		base64Data := base64Encode(chunk)
+
+		chunkReqID := GenerateReqId(WsCmd.UPLOAD_MEDIA_CHUNK)
+		_, err := c.wsManager.SendReply(chunkReqID, UploadMediaChunkBody{
+			UploadID:   initResp.UploadID,
+			ChunkIndex: i,
+			Base64Data: base64Data,
+		}, WsCmd.UPLOAD_MEDIA_CHUNK)
+		if err != nil {
+			return nil, fmt.Errorf("chunk %d upload failed: %w", i, err)
+		}
+
+		c.logger.Debug(fmt.Sprintf("Uploaded chunk %d/%d (%d bytes)", i+1, totalChunks, len(chunk)))
+	}
+
+	c.logger.Info(fmt.Sprintf("All %d chunks uploaded, finishing...", totalChunks))
+
+	// Step 3: 完成上传
+	finishReqID := GenerateReqId(WsCmd.UPLOAD_MEDIA_FINISH)
+	finishResult, err := c.wsManager.SendReply(finishReqID, UploadMediaFinishBody{
+		UploadID: initResp.UploadID,
+	}, WsCmd.UPLOAD_MEDIA_FINISH)
+	if err != nil {
+		return nil, fmt.Errorf("upload finish failed: %w", err)
+	}
+
+	var finishResp UploadMediaFinishResult
+	if err := json.Unmarshal(finishResult.Body, &finishResp); err != nil {
+		return nil, fmt.Errorf("upload finish response parse failed: %w", err)
+	}
+	if finishResp.MediaID == "" {
+		return nil, fmt.Errorf("upload finish failed: no media_id returned")
+	}
+
+	c.logger.Info(fmt.Sprintf("Upload complete: media_id=%s, type=%s", finishResp.MediaID, finishResp.Type))
+
+	return &finishResp, nil
+}
+
+// ReplyMedia 被动回复媒体消息（便捷方法）
+//
+// 通过 aibot_respond_msg 被动回复通道发送媒体消息（file/image/voice/video）
+func (c *WSClient) ReplyMedia(frame *WsFrame, mediaType WeComMediaType, mediaID string, videoOptions *VideoMediaContent) (*WsFrame, error) {
+	body := buildMediaMsgBody(mediaType, mediaID, videoOptions)
+	return c.Reply(frame, body, "")
+}
+
+// SendMediaMessage 主动发送媒体消息（便捷方法）
+//
+// 通过 aibot_send_msg 主动推送通道发送媒体消息
+func (c *WSClient) SendMediaMessage(chatID string, mediaType WeComMediaType, mediaID string, videoOptions *VideoMediaContent) (*WsFrame, error) {
+	body := buildMediaMsgBody(mediaType, mediaID, videoOptions)
+	return c.SendMessage(chatID, body)
+}
+
+// buildMediaMsgBody 构建媒体消息体
+func buildMediaMsgBody(mediaType WeComMediaType, mediaID string, videoOptions *VideoMediaContent) SendMediaMsgBody {
+	body := SendMediaMsgBody{
+		MsgType: mediaType,
+	}
+	switch mediaType {
+	case WeComMediaTypeFile:
+		body.File = &MediaContent{MediaID: mediaID}
+	case WeComMediaTypeImage:
+		body.Image = &MediaContent{MediaID: mediaID}
+	case WeComMediaTypeVoice:
+		body.Voice = &MediaContent{MediaID: mediaID}
+	case WeComMediaTypeVideo:
+		vc := &VideoMediaContent{MediaID: mediaID}
+		if videoOptions != nil {
+			vc.Title = videoOptions.Title
+			vc.Description = videoOptions.Description
+		}
+		body.Video = vc
+	}
+	return body
 }
 
 // ============================================================================
