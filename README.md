@@ -19,6 +19,7 @@
 - **文件下载解密** — 内置 AES-256-CBC 文件解密，每个图片/文件消息自带独立的 aeskey
 - **可插拔日志** — 支持自定义 Logger，内置带时间戳的 DefaultLogger
 - **扫码创建机器人** — 调用企业微信 `generate` / `query_result` 接口，用扫码方式获取 `BotID` 与 `Secret`（与 [wecom-openclaw-cli](wecom-openclaw-cli/) 中二维码流程一致）
+- **个人微信扫码登录（iLink）** — 集成 [openilink-sdk-go](https://github.com/openilink/openilink-sdk-go)，通过 `ilink` 协议完成个微扫码登录与长轮询收消息等能力（与本仓库 `WSClient` 企业通道独立）
 
 ## 安装
 
@@ -174,6 +175,76 @@ creds, err := aibot.ScanQRCodeForBotInfo(ctx, cfg, func(s *aibot.QRCodeSession) 
 ```
 
 说明：本 SDK **不包含** 终端 ASCII 二维码绘制；若需在终端展示，可自行引入二维码库，以 `sess.AuthURL` 为内容生成图像或终端图案。
+
+## 个人微信扫码登录（iLink / OpeniLink）
+
+本仓库通过依赖 [openilink-sdk-go](https://github.com/openilink/openilink-sdk-go) 支持**个人微信**侧 iLink Bot 的扫码登录与后续 API（长轮询收消息、Push 等）。完整能力、超时与状态码说明见上游 [README](https://github.com/openilink/openilink-sdk-go/blob/main/README.md)。
+
+与企业微信智能机器人 **不是同一条链路**：
+
+| 场景 | 客户端 | 凭据 / 通道 |
+| --- | --- | --- |
+| 企业微信智能机器人 | `aibot.NewWSClient` | `BotID` + `Secret`，WebSocket `wss://openws.work.weixin.qq.com` |
+| 个人微信（iLink） | `aibot.NewILinkClient` | 扫码成功后 `BotToken`、`BotID`（iLink）等，HTTPS `ilink/bot/...` |
+
+`aibot` 内提供的封装如下（类型多为上游别名，便于单模块 import）：
+
+| 符号 | 说明 |
+| --- | --- |
+| `NewILinkClient(token, opts...)` | 创建 iLink 客户端；未登录时 `token` 传空字符串 |
+| `PersonalWeChatLoginWithQR(ctx, client, cb)` | 执行完整扫码流程，等价于 `client.LoginWithQR` |
+| `ILinkLoginCallbacks` | `OnQRCode` / `OnScanned` / `OnExpired` 回调 |
+| `ILinkLoginResult` | `Connected`、`BotID`、`BotToken`、`UserID`、`BaseURL`、`Message` |
+| `ILinkWithBaseURL` / `ILinkWithHTTPClient` / `ILinkWithBotType` 等 | 与上游 `ilink.WithXxx` 一致 |
+| `ILinkDefaultBaseURL` 等常量 | 默认指向 `https://ilinkai.weixin.qq.com` 等 |
+| `ILinkExtractText` | 从 `ILinkWeixinMessage` 提取文本 |
+| `ILinkClient` | 登录成功后调用 `Monitor`、`Push` 等方法（定义在上游包） |
+
+示例：扫码登录并进入监听（与上游 [example/echo-bot](https://github.com/openilink/openilink-sdk-go/tree/main/example/echo-bot) 思路一致；`OnQRCode` 的字符串可按上游 README 渲染为二维码图片）：
+
+```go
+import (
+	"context"
+	"fmt"
+	"log"
+	"os/signal"
+	"syscall"
+
+	aibot "github.com/go-sphere/wecom-aibot-go-sdk/aibot"
+)
+
+ctx := context.Background()
+client := aibot.NewILinkClient("")
+
+result, err := aibot.PersonalWeChatLoginWithQR(ctx, client, &aibot.ILinkLoginCallbacks{
+	OnQRCode: func(imgContent string) {
+		fmt.Println("请使用微信扫描（或将内容渲染为二维码）:", imgContent)
+	},
+	OnScanned: func() { fmt.Println("已扫码，请在手机上确认登录") },
+	OnExpired: func(attempt, max int) { fmt.Printf("二维码过期，正在刷新 (%d/%d)\n", attempt, max) },
+})
+if err != nil {
+	log.Fatal(err)
+}
+if !result.Connected {
+	log.Fatalf("登录未完成: %s", result.Message)
+}
+
+listenCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+defer cancel()
+
+_ = client.Monitor(listenCtx, func(msg aibot.ILinkWeixinMessage) {
+	text := aibot.ILinkExtractText(&msg)
+	if text == "" {
+		return
+	}
+	if _, e := client.Push(listenCtx, msg.FromUserID, "echo: "+text); e != nil {
+		log.Printf("回复失败: %v", e)
+	}
+}, &aibot.ILinkMonitorOptions{})
+```
+
+`Monitor`、`Push`、`ILinkMonitorOptions`（如 `InitialBuf`、`OnBufUpdate` 同步缓冲持久化）等行为以 [openilink-sdk-go](https://github.com/openilink/openilink-sdk-go) 为准；本仓库不重复实现 iLink 协议。
 
 ## API 文档
 
@@ -369,6 +440,8 @@ client := aibot.NewWSClient(aibot.WSClientOptions{
 | `CreateWelcomeReplyBody(content)` | 创建欢迎语回复消息体 |
 | `CreateStreamReplyBody(streamID, content, finish, msgItem, feedback)` | 创建流式回复消息体 |
 
+个人微信 iLink：`NewILinkClient`、`PersonalWeChatLoginWithQR`、`ILinkExtractText` 及选项函数见上文「个人微信扫码登录（iLink / OpeniLink）」。
+
 ## 项目结构
 
 ```
@@ -379,7 +452,8 @@ wecom-aibot-go-sdk/
 │   ├── message_handler.go  # 消息解析与事件分发
 │   ├── api.go              # HTTP API 客户端（文件下载）
 │   ├── crypto.go           # AES-256-CBC 文件解密
-│   ├── qrcode_scan.go      # 扫码创建机器人（generate / query_result）
+│   ├── qrcode_scan.go      # 企业微信扫码创建机器人（generate / query_result）
+│   ├── openilink.go        # 个人微信 iLink：封装 openilink-sdk-go（扫码登录等）
 │   ├── logger.go           # 日志接口与默认实现
 │   ├── utils.go            # 工具方法
 │   ├── types.go            # 类型定义
